@@ -67,18 +67,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model",
-        default=os.getenv("OPENAI_MODEL", "qwen3_235b"),
+        default=os.getenv("OPENAI_MODEL", "qwen3.5-35b-a3b"),
         help="OpenAI-compatible model name.",
     )
     parser.add_argument(
         "--base-url",
-        default=os.getenv("OPENAI_BASE_URL", "http://10.100.36.33:8000/v1"),
+        default=os.getenv("OPENAI_BASE_URL", "http://10.100.36.32:8000/v1"),
         help="OpenAI-compatible base URL.",
     )
     parser.add_argument(
         "--api-key",
         default=os.getenv("OPENAI_API_KEY"),
-        help="OpenAI-compatible API key.",
+        help="Optional OpenAI-compatible API key.",
     )
     parser.add_argument(
         "--timeout",

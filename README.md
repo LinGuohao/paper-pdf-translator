@@ -58,10 +58,10 @@ in the same directory as the source PDF.
 
 The wrapper currently defaults to:
 
-- `OPENAI_BASE_URL=http://10.100.36.33:8000/v1`
-- `OPENAI_MODEL=qwen3_235b`
+- `OPENAI_BASE_URL=http://10.100.36.32:8000/v1`
+- `OPENAI_MODEL=qwen3.5-35b-a3b`
 
-The API key is still intentionally not stored in the repository. Pass it with `--api-key` or `OPENAI_API_KEY`.
+This backend does not require an API key. If no key is provided, the wrapper uses a harmless placeholder value internally for OpenAI-compatible client compatibility.
 
 This wrapper also patches the upstream runtime in two ways for OpenAI-compatible backends:
 
@@ -72,12 +72,11 @@ This wrapper also patches the upstream runtime in two ways for OpenAI-compatible
 
 These values are picked up automatically if the corresponding CLI flag is not provided:
 
-- `OPENAI_API_KEY`
 - `OPENAI_BASE_URL`
 - `OPENAI_MODEL`
 
-If `OPENAI_BASE_URL` is not set, the wrapper defaults to `http://10.100.36.33:8000/v1`.
-If `OPENAI_MODEL` is not set, the wrapper defaults to `qwen3_235b`.
+If `OPENAI_BASE_URL` is not set, the wrapper defaults to `http://10.100.36.32:8000/v1`.
+If `OPENAI_MODEL` is not set, the wrapper defaults to `qwen3.5-35b-a3b`.
 
 ## Useful Options
 

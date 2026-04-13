@@ -17,7 +17,7 @@ class TranslateRequest:
     output_path: Path
     source_lang: str = "en"
     target_lang: str = "zh"
-    model: str = "qwen3_235b"
+    model: str = "qwen3.5-35b-a3b"
     api_key: str | None = None
     base_url: str | None = None
     timeout: float | None = None
@@ -44,8 +44,6 @@ class TranslateRequest:
             raise FileNotFoundError(f"Input PDF does not exist: {self.input_path}")
         if self.input_path.suffix.lower() != ".pdf":
             raise ValueError(f"Input file is not a PDF: {self.input_path}")
-        if not self.api_key:
-            raise ValueError("An API key is required. Pass --api-key or set OPENAI_API_KEY.")
         if not self.base_url:
             raise ValueError(
                 "A base URL is required. Pass --base-url or set OPENAI_BASE_URL."
@@ -67,7 +65,7 @@ def _build_settings(request: TranslateRequest, output_dir: Path):
     translate_engine_settings = OpenAICompatibleSettings(
         openai_compatible_model=request.model,
         openai_compatible_base_url=request.base_url,
-        openai_compatible_api_key=request.api_key,
+        openai_compatible_api_key=request.api_key or "EMPTY",
         openai_compatible_timeout=(
             str(request.timeout) if request.timeout is not None else None
         ),
@@ -115,8 +113,10 @@ def _build_settings(request: TranslateRequest, output_dir: Path):
 def _patch_pdf2zh_next_runtime() -> None:
     import importlib
 
+    import babeldoc.format.pdf.high_level as babeldoc_high_level
     import httpx
     import openai
+    import requests
     from tenacity import before_sleep_log
     from tenacity import retry
     from tenacity import retry_if_exception
@@ -129,10 +129,16 @@ def _patch_pdf2zh_next_runtime() -> None:
     if getattr(translator_utils, "_paper_pdf_translator_patched", False):
         return
 
+    original_openai_init = OpenAITranslator.__init__
+
+    class _RetryableOpenAICompatibleError(Exception):
+        pass
+
     def _should_retry_openai_error(exc: BaseException) -> bool:
         if isinstance(
             exc,
             (
+                _RetryableOpenAICompatibleError,
                 openai.RateLimitError,
                 openai.InternalServerError,
                 openai.APIConnectionError,
@@ -155,25 +161,93 @@ def _patch_pdf2zh_next_runtime() -> None:
 
     def _update_usage_counters(translator, response) -> None:
         try:
-            if hasattr(response, "usage") and response.usage:
-                if hasattr(response.usage, "total_tokens"):
-                    translator.token_count.inc(response.usage.total_tokens)
-                if hasattr(response.usage, "prompt_tokens"):
-                    translator.prompt_token_count.inc(response.usage.prompt_tokens)
-                if hasattr(response.usage, "completion_tokens"):
-                    translator.completion_token_count.inc(response.usage.completion_tokens)
-                if hasattr(response.usage, "prompt_cache_hit_tokens"):
-                    translator.cache_hit_prompt_token_count.inc(
-                        response.usage.prompt_cache_hit_tokens
-                    )
-                elif hasattr(response.usage, "prompt_tokens_details") and hasattr(
-                    response.usage.prompt_tokens_details, "cached_tokens"
-                ):
-                    translator.cache_hit_prompt_token_count.inc(
-                        response.usage.prompt_tokens_details.cached_tokens
-                    )
+            usage = None
+            if isinstance(response, dict):
+                usage = response.get("usage")
+            elif hasattr(response, "usage") and response.usage:
+                usage = response.usage
+            if not usage:
+                return
+
+            if isinstance(usage, dict):
+                total_tokens = usage.get("total_tokens")
+                prompt_tokens = usage.get("prompt_tokens")
+                completion_tokens = usage.get("completion_tokens")
+                prompt_cache_hit_tokens = usage.get("prompt_cache_hit_tokens")
+                prompt_token_details = usage.get("prompt_tokens_details") or {}
+                cached_tokens = prompt_token_details.get("cached_tokens")
+            else:
+                total_tokens = getattr(usage, "total_tokens", None)
+                prompt_tokens = getattr(usage, "prompt_tokens", None)
+                completion_tokens = getattr(usage, "completion_tokens", None)
+                prompt_cache_hit_tokens = getattr(
+                    usage, "prompt_cache_hit_tokens", None
+                )
+                prompt_token_details = getattr(usage, "prompt_tokens_details", None)
+                cached_tokens = getattr(prompt_token_details, "cached_tokens", None)
+
+            if total_tokens is not None:
+                translator.token_count.inc(total_tokens)
+            if prompt_tokens is not None:
+                translator.prompt_token_count.inc(prompt_tokens)
+            if completion_tokens is not None:
+                translator.completion_token_count.inc(completion_tokens)
+            if prompt_cache_hit_tokens is not None:
+                translator.cache_hit_prompt_token_count.inc(prompt_cache_hit_tokens)
+            elif cached_tokens is not None:
+                translator.cache_hit_prompt_token_count.inc(cached_tokens)
         except Exception as exc:  # pragma: no cover - best effort bookkeeping
             logger.debug("Failed to record token usage: %s", exc)
+
+    def _minimal_chat_completion_request(self, messages, rate_limit_params=None):
+        base_url = getattr(self, "_paper_pdf_translator_base_url", None)
+        if not base_url:
+            raise RuntimeError("Missing OpenAI-compatible base URL.")
+
+        url = base_url.rstrip("/") + "/chat/completions"
+        headers = {"Content-Type": "application/json"}
+        api_key = getattr(self, "_paper_pdf_translator_api_key", None)
+        if api_key and api_key != "EMPTY":
+            headers["Authorization"] = f"bearer {api_key}"
+
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+        }
+        if self.send_temperature and self.temperature:
+            payload["temperature"] = float(self.temperature)
+        if self.send_reasoning_effort and self.reasoning_effort:
+            payload["reasoning_effort"] = self.reasoning_effort
+
+        timeout = getattr(self, "_paper_pdf_translator_timeout", None) or 120
+        response = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        if response.status_code >= 500:
+            raise _RetryableOpenAICompatibleError(
+                f"OpenAI-compatible backend returned {response.status_code}: "
+                f"{response.text[:500]}"
+            )
+        if response.status_code == 429:
+            raise _RetryableOpenAICompatibleError(
+                f"OpenAI-compatible backend returned 429: {response.text[:500]}"
+            )
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"OpenAI-compatible request failed with status {response.status_code}: "
+                f"{response.text[:1000]}"
+            )
+        return response.json()
+
+    def _patched_openai_init(self, settings, rate_limiter):
+        original_openai_init(self, settings, rate_limiter)
+        self._paper_pdf_translator_base_url = (
+            settings.translate_engine_settings.openai_base_url
+        )
+        self._paper_pdf_translator_api_key = (
+            settings.translate_engine_settings.openai_api_key
+        )
+        timeout = settings.translate_engine_settings.openai_timeout
+        self._paper_pdf_translator_timeout = float(timeout) if timeout else 120.0
 
     @retry(
         retry=retry_if_exception(_should_retry_openai_error),
@@ -183,21 +257,13 @@ def _patch_pdf2zh_next_runtime() -> None:
         reraise=True,
     )
     def _patched_do_translate(self, text, rate_limit_params: dict = None) -> str:
-        options = self.options.copy()
-        if (
-            self.enable_json_mode
-            and rate_limit_params
-            and rate_limit_params.get("request_json_mode", False)
-        ):
-            options["response_format"] = {"type": "json_object"}
-
-        response = self.client.chat.completions.create(
-            model=self.model,
-            **options,
+        response = _minimal_chat_completion_request(
+            self,
             messages=self.prompt(text),
+            rate_limit_params=rate_limit_params,
         )
         _update_usage_counters(self, response)
-        message = response.choices[0].message.content.strip()
+        message = response["choices"][0]["message"]["content"].strip()
         return self._remove_cot_content(message)
 
     @retry(
@@ -211,21 +277,13 @@ def _patch_pdf2zh_next_runtime() -> None:
         if text is None:
             return None
 
-        options = self.options.copy()
-        if (
-            self.enable_json_mode
-            and rate_limit_params
-            and rate_limit_params.get("request_json_mode", False)
-        ):
-            options["response_format"] = {"type": "json_object"}
-
-        response = self.client.chat.completions.create(
-            model=self.model,
-            **options,
+        response = _minimal_chat_completion_request(
+            self,
             messages=[{"role": "user", "content": text}],
+            rate_limit_params=rate_limit_params,
         )
         _update_usage_counters(self, response)
-        message = response.choices[0].message.content.strip()
+        message = response["choices"][0]["message"]["content"].strip()
         return self._remove_cot_content(message)
 
     def _create_translator_instance_without_health_check(
@@ -276,11 +334,15 @@ def _patch_pdf2zh_next_runtime() -> None:
 
         raise ValueError("No translator found")
 
+    OpenAITranslator.__init__ = _patched_openai_init
     OpenAITranslator.do_translate = _patched_do_translate
     OpenAITranslator.do_llm_translate = _patched_do_llm_translate
     translator_utils._create_translator_instance = (
         _create_translator_instance_without_health_check
     )
+    # Force BabelDOC to use the simpler per-paragraph translation path.
+    # The LLM-only batch JSON path is more fragile with the current backend.
+    babeldoc_high_level.translator_supports_llm = lambda _translator: False
     translator_utils._paper_pdf_translator_patched = True
 
 
