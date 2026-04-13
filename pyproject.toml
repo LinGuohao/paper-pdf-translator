@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "paper-pdf-translator"
+version = "0.1.0"
+description = "Minimal headless paper PDF translator built on pdf2zh-next"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pdf2zh-next>=2.8.2,<3",
+]
+
+[project.scripts]
+paper-pdf-translator = "paper_pdf_translator.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["paper_pdf_translator"]
+
