@@ -17,7 +17,7 @@ class TranslateRequest:
     output_path: Path
     source_lang: str = "en"
     target_lang: str = "zh"
-    model: str = "gpt-4o-mini"
+    model: str = "qwen3_235b"
     api_key: str | None = None
     base_url: str | None = None
     timeout: float | None = None

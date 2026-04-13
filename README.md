@@ -46,6 +46,15 @@ If `--output` is omitted, the tool writes to:
 
 in the same directory as the source PDF.
 
+## Default OpenAI-Compatible Backend
+
+The wrapper currently defaults to:
+
+- `OPENAI_BASE_URL=http://10.100.36.33:8000/v1`
+- `OPENAI_MODEL=qwen3_235b`
+
+The API key is still intentionally not stored in the repository. Pass it with `--api-key` or `OPENAI_API_KEY`.
+
 ## Environment Variables
 
 These values are picked up automatically if the corresponding CLI flag is not provided:
@@ -54,7 +63,8 @@ These values are picked up automatically if the corresponding CLI flag is not pr
 - `OPENAI_BASE_URL`
 - `OPENAI_MODEL`
 
-If `OPENAI_BASE_URL` is not set, the wrapper defaults to `https://api.openai.com/v1`.
+If `OPENAI_BASE_URL` is not set, the wrapper defaults to `http://10.100.36.33:8000/v1`.
+If `OPENAI_MODEL` is not set, the wrapper defaults to `qwen3_235b`.
 
 ## Useful Options
 

@@ -58,12 +58,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model",
-        default=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        default=os.getenv("OPENAI_MODEL", "qwen3_235b"),
         help="OpenAI-compatible model name.",
     )
     parser.add_argument(
         "--base-url",
-        default=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        default=os.getenv("OPENAI_BASE_URL", "http://10.100.36.33:8000/v1"),
         help="OpenAI-compatible base URL.",
     )
     parser.add_argument(
