@@ -41,6 +41,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("input_pdf", type=Path, help="Path to the source PDF.")
     parser.add_argument(
+        "output_pdf",
+        nargs="?",
+        type=Path,
+        help=(
+            "Optional output PDF path as a positional argument. "
+            "Equivalent to --output."
+        ),
+    )
+    parser.add_argument(
         "-o",
         "--output",
         type=Path,
@@ -161,8 +170,14 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(debug=args.debug, quiet=args.quiet)
 
     input_pdf = args.input_pdf.expanduser().resolve()
-    output = args.output.expanduser().resolve() if args.output else _default_output_path(
-        input_pdf, args.target_lang
+    if args.output and args.output_pdf:
+        parser.error("Use either positional output_pdf or --output, not both.")
+
+    output_arg = args.output or args.output_pdf
+    output = (
+        output_arg.expanduser().resolve()
+        if output_arg
+        else _default_output_path(input_pdf, args.target_lang)
     )
 
     request = TranslateRequest(

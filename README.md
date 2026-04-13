@@ -31,11 +31,19 @@ On first run, BabelDOC may download assets required for layout processing.
 
 ```bash
 paper-pdf-translator /path/to/paper.pdf \
-  --output /path/to/paper.zh.pdf \
+  /path/to/paper.zh.pdf \
   --api-key "$OPENAI_API_KEY" \
   --base-url "$OPENAI_BASE_URL" \
   --model "$OPENAI_MODEL" \
   --target-lang zh
+```
+
+Or equivalently:
+
+```bash
+paper-pdf-translator /path/to/paper.pdf \
+  --output /path/to/paper.zh.pdf \
+  --api-key "$OPENAI_API_KEY"
 ```
 
 If `--output` is omitted, the tool writes to:
