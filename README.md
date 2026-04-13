@@ -63,6 +63,11 @@ The wrapper currently defaults to:
 
 The API key is still intentionally not stored in the repository. Pass it with `--api-key` or `OPENAI_API_KEY`.
 
+This wrapper also patches the upstream runtime in two ways for OpenAI-compatible backends:
+
+- skip the eager startup health-check request
+- retry transient backend failures such as `502` and other `5xx` responses with exponential backoff
+
 ## Environment Variables
 
 These values are picked up automatically if the corresponding CLI flag is not provided:

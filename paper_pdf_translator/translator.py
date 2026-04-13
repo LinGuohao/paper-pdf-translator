@@ -83,7 +83,8 @@ def _build_settings(request: TranslateRequest, output_dir: Path):
         report_interval=0.5,
         basic=BasicSettings(
             input_files=set(),
-            debug=request.debug,
+            # Force in-process translation so local monkey patches apply reliably.
+            debug=True,
         ),
         translation=TranslationSettings(
             lang_in=request.source_lang,
@@ -109,6 +110,178 @@ def _build_settings(request: TranslateRequest, output_dir: Path):
     )
     settings.validate_settings()
     return settings
+
+
+def _patch_pdf2zh_next_runtime() -> None:
+    import importlib
+
+    import httpx
+    import openai
+    from tenacity import before_sleep_log
+    from tenacity import retry
+    from tenacity import retry_if_exception
+    from tenacity import stop_after_attempt
+    from tenacity import wait_exponential
+
+    import pdf2zh_next.translator.utils as translator_utils
+    from pdf2zh_next.translator.translator_impl.openai import OpenAITranslator
+
+    if getattr(translator_utils, "_paper_pdf_translator_patched", False):
+        return
+
+    def _should_retry_openai_error(exc: BaseException) -> bool:
+        if isinstance(
+            exc,
+            (
+                openai.RateLimitError,
+                openai.InternalServerError,
+                openai.APIConnectionError,
+                openai.APITimeoutError,
+                httpx.ConnectError,
+                httpx.ReadError,
+                httpx.WriteError,
+                httpx.RemoteProtocolError,
+                httpx.ReadTimeout,
+                httpx.WriteTimeout,
+            ),
+        ):
+            return True
+        if isinstance(exc, openai.APIStatusError):
+            status_code = getattr(exc, "status_code", None)
+            return status_code == 429 or (status_code is not None and status_code >= 500)
+        if isinstance(exc, httpx.HTTPStatusError):
+            return exc.response is not None and exc.response.status_code >= 500
+        return False
+
+    def _update_usage_counters(translator, response) -> None:
+        try:
+            if hasattr(response, "usage") and response.usage:
+                if hasattr(response.usage, "total_tokens"):
+                    translator.token_count.inc(response.usage.total_tokens)
+                if hasattr(response.usage, "prompt_tokens"):
+                    translator.prompt_token_count.inc(response.usage.prompt_tokens)
+                if hasattr(response.usage, "completion_tokens"):
+                    translator.completion_token_count.inc(response.usage.completion_tokens)
+                if hasattr(response.usage, "prompt_cache_hit_tokens"):
+                    translator.cache_hit_prompt_token_count.inc(
+                        response.usage.prompt_cache_hit_tokens
+                    )
+                elif hasattr(response.usage, "prompt_tokens_details") and hasattr(
+                    response.usage.prompt_tokens_details, "cached_tokens"
+                ):
+                    translator.cache_hit_prompt_token_count.inc(
+                        response.usage.prompt_tokens_details.cached_tokens
+                    )
+        except Exception as exc:  # pragma: no cover - best effort bookkeeping
+            logger.debug("Failed to record token usage: %s", exc)
+
+    @retry(
+        retry=retry_if_exception(_should_retry_openai_error),
+        stop=stop_after_attempt(8),
+        wait=wait_exponential(multiplier=1, min=1, max=20),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
+    def _patched_do_translate(self, text, rate_limit_params: dict = None) -> str:
+        options = self.options.copy()
+        if (
+            self.enable_json_mode
+            and rate_limit_params
+            and rate_limit_params.get("request_json_mode", False)
+        ):
+            options["response_format"] = {"type": "json_object"}
+
+        response = self.client.chat.completions.create(
+            model=self.model,
+            **options,
+            messages=self.prompt(text),
+        )
+        _update_usage_counters(self, response)
+        message = response.choices[0].message.content.strip()
+        return self._remove_cot_content(message)
+
+    @retry(
+        retry=retry_if_exception(_should_retry_openai_error),
+        stop=stop_after_attempt(8),
+        wait=wait_exponential(multiplier=1, min=1, max=20),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
+    def _patched_do_llm_translate(self, text, rate_limit_params: dict = None):
+        if text is None:
+            return None
+
+        options = self.options.copy()
+        if (
+            self.enable_json_mode
+            and rate_limit_params
+            and rate_limit_params.get("request_json_mode", False)
+        ):
+            options["response_format"] = {"type": "json_object"}
+
+        response = self.client.chat.completions.create(
+            model=self.model,
+            **options,
+            messages=[{"role": "user", "content": text}],
+        )
+        _update_usage_counters(self, response)
+        message = response.choices[0].message.content.strip()
+        return self._remove_cot_content(message)
+
+    def _create_translator_instance_without_health_check(
+        settings,
+        translator_config,
+        rate_limiter,
+        enforce_glossary_support: bool = True,
+    ):
+        if isinstance(
+            translator_config,
+            translator_utils.NOT_SUPPORTED_TRANSLATION_ENGINE_SETTING_TYPE,
+        ):
+            raise translator_utils.TranslateEngineSettingError(
+                f"{translator_config.translate_engine_type} is not supported, Please use other translator!"
+            )
+
+        for metadata in translator_utils.TRANSLATION_ENGINE_METADATA:
+            if isinstance(translator_config, metadata.setting_model_type):
+                translate_engine_type = metadata.translate_engine_type
+                logger.info("Using %s translator", translate_engine_type)
+                model_name = (
+                    f"pdf2zh_next.translator.translator_impl.{translate_engine_type.lower()}"
+                )
+                module = importlib.import_module(model_name)
+
+                if (
+                    enforce_glossary_support
+                    and settings.translation.glossaries
+                    and not metadata.support_llm
+                ):
+                    raise translator_utils.TranslateEngineSettingError(
+                        f"{translate_engine_type} does not support glossary. Please choose a different translator or remove the glossary."
+                    )
+
+                temp_settings = settings.model_copy()
+                temp_settings.translate_engine_settings = translator_config
+                translator = getattr(module, f"{translate_engine_type}Translator")(
+                    temp_settings, rate_limiter
+                )
+
+                recommended_qps = getattr(
+                    translator, "pdf2zh_next_recommended_qps", None
+                )
+                recommended_pool_max_workers = getattr(
+                    translator, "pdf2zh_next_recommended_pool_max_workers", None
+                )
+                return translator, recommended_qps, recommended_pool_max_workers
+
+        raise ValueError("No translator found")
+
+    OpenAITranslator.do_translate = _patched_do_translate
+    OpenAITranslator.do_llm_translate = _patched_do_llm_translate
+    translator_utils._create_translator_instance = (
+        _create_translator_instance_without_health_check
+    )
+    translator_utils._paper_pdf_translator_patched = True
 
 
 def _pick_output_pdf(translate_result) -> Path:
@@ -163,6 +336,8 @@ async def translate_pdf_async(request: TranslateRequest) -> Path:
             f"'{missing}'. Install project dependencies first with: "
             "`python -m pip install -e .`"
         ) from exc
+
+    _patch_pdf2zh_next_runtime()
 
     if request.work_dir is not None:
         request.work_dir.mkdir(parents=True, exist_ok=True)
