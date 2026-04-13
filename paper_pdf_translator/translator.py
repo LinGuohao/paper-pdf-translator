@@ -153,8 +153,16 @@ def _log_event(event: dict, last_progress_bucket: int) -> int:
 async def translate_pdf_async(request: TranslateRequest) -> Path:
     request.validate()
 
-    import babeldoc.assets.assets
-    from pdf2zh_next.high_level import do_translate_async_stream
+    try:
+        import babeldoc.assets.assets
+        from pdf2zh_next.high_level import do_translate_async_stream
+    except ModuleNotFoundError as exc:
+        missing = exc.name or "required dependency"
+        raise RuntimeError(
+            "Missing runtime dependency "
+            f"'{missing}'. Install project dependencies first with: "
+            "`python -m pip install -e .`"
+        ) from exc
 
     if request.work_dir is not None:
         request.work_dir.mkdir(parents=True, exist_ok=True)
